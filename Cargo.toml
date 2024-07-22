@@ -1,0 +1,16 @@
+[package]
+name = "cc_streaming"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+m3u8-rs = "6.0"
+ffmpeg-next = "7.0"
+reqwest = { version = "0.12.5", features = ["rustls-tls"] }
+tokio = { version = "1.38.1", features = ["full"] }
+thiserror = "1.0.63"
+image = "0.25.1"
+clap = { version = "4.5.9", features = ["derive"] }
+once_cell = "1.19.0"
+anyhow = "1.0.86"
+palette = "0.7.6"
