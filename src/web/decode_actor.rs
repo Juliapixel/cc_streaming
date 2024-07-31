@@ -2,7 +2,6 @@ use std::{future::Future, task::Poll};
 
 use actix::ActorFuture;
 use either::Either;
-use image::RgbImage;
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
@@ -13,6 +12,9 @@ use crate::{
 
 use super::ws::{StreamAudioFrame, StreamVideoFrame, StreamWsHandler};
 
+// TODO: pace frame decoding to keep a small buffer of a couples seconds based
+// otherwise playback is all weird!
+
 pub struct DecodeActor {
     frame_receiver: Receiver<Either<StreamVideoFrame, StreamAudioFrame>>,
 }
@@ -20,6 +22,9 @@ pub struct DecodeActor {
 impl DecodeActor {
     pub fn new(mut decode_iter: DecodeIter) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(5);
+
+        // basically just does all the decoding in regular blocking code and
+        // sends it over to the async code via channels (look up to see channel)
         std::thread::spawn(move || loop {
             match decode_iter.next() {
                 Some(Ok(Either::Left(video_frame))) => {

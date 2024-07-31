@@ -1,9 +1,7 @@
 use ffmpeg_next::{
     decoder,
     frame::{Audio, Video},
-    software::scaling::Flags,
 };
-use image::RgbImage;
 
 use crate::frame::{AudioFrame, VideoFrame};
 
@@ -27,7 +25,7 @@ pub fn image_from_decoder(
 }
 
 pub fn audio_from_decoder(decoder: &mut decoder::Audio) -> Result<AudioFrame, DecodeError> {
-    let mut decoded = ffmpeg_next::util::frame::Audio::empty();
+    let mut decoded = Audio::empty();
     match decoder.receive_frame(&mut decoded) {
         Ok(_) => Ok(AudioFrame::from_ffmpeg(
             &decoded,

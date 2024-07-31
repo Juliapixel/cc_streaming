@@ -41,7 +41,7 @@ impl Actor for StreamWsHandler {
 
         let decoder = Decoder::new(vid_stream, aud_stream, self.height).unwrap();
 
-        let mut frame_iter = decoder.into_frame_iter(ictx);
+        let frame_iter = decoder.into_frame_iter(ictx);
 
         ctx.spawn(DecodeActor::new(frame_iter));
     }
@@ -62,7 +62,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for StreamWsHandler {
     fn handle(&mut self, item: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         match item {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
-            Ok(ws::Message::Text(msg)) => (),
+            Ok(ws::Message::Text(_msg)) => (),
             Ok(_) => ctx.close(None),
             Err(_) => ctx.close(Some(ws::CloseReason {
                 code: ws::CloseCode::Protocol,

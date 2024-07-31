@@ -1,14 +1,6 @@
-use std::sync::atomic::Ordering;
-
 use cc_streaming::{
     cli::ARGS,
-    decoder::{DecodeError, Decoder},
-    palette::Palette,
     web::stream,
-};
-use ffmpeg_next::format::input;
-use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator, ParallelBridge, ParallelIterator,
 };
 
 const DEFAULT_LEVEL: &str = {
