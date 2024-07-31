@@ -7,26 +7,46 @@ use ffmpeg_next::{
     Stream,
 };
 use image::RgbImage;
+use iter::DecodeIter;
 
-pub struct Decoder {
-    video_decoder: decoder::Video,
-    video_stream_idx: usize,
-    audio_decoder: decoder::Audio,
-    audio_stream_idx: usize,
-}
+pub mod iter;
+mod util;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error(transparent)]
-    FfmpegError(#[from] ffmpeg_next::Error),
+    FfmpegError(ffmpeg_next::Error),
+    #[error("no frames yet to decode")]
+    NoFramesYet,
     #[error("failed to convert frame to image")]
     ImageError,
     #[error("audio frame had a length not divisible by 4")]
     AudioFrameLength,
 }
 
+impl From<ffmpeg_next::Error> for DecodeError {
+    fn from(value: ffmpeg_next::Error) -> Self {
+        match value {
+            ffmpeg_next::Error::Other { errno: 11 } => Self::NoFramesYet,
+            e => Self::FfmpegError(e),
+        }
+    }
+}
+
+pub struct Decoder {
+    video_decoder: decoder::Video,
+    video_stream_idx: usize,
+    audio_decoder: decoder::Audio,
+    audio_stream_idx: usize,
+    target_height: u32,
+}
+
 impl Decoder {
-    pub fn new(video_stream: Stream, audio_stream: Stream) -> Result<Self, DecodeError> {
+    pub fn new(
+        video_stream: Stream,
+        audio_stream: Stream,
+        target_height: u32,
+    ) -> Result<Self, DecodeError> {
         let video_ctx = Context::from_parameters(video_stream.parameters())?;
         let audio_ctx = Context::from_parameters(audio_stream.parameters())?;
         Ok(Self {
@@ -34,9 +54,11 @@ impl Decoder {
             video_stream_idx: video_stream.index(),
             audio_decoder: audio_ctx.decoder().audio()?,
             audio_stream_idx: audio_stream.index(),
+            target_height,
         })
     }
 
+    #[deprecated]
     pub fn decode_all(
         &mut self,
         input: &mut Input,
@@ -52,21 +74,28 @@ impl Decoder {
                     decoded.width(),
                     decoded.height(),
                     ffmpeg_next::format::Pixel::RGB24,
-                    (decoded.width() as f32 / decoded.height() as f32 * 144.0).round() as u32,
-                    144,
-                    Flags::BILINEAR,
+                    decoded.width(),
+                    decoded.height(),
+                    Flags::POINT,
                 )?;
 
                 let mut converted = Video::empty();
                 scaler.run(&decoded, &mut converted)?;
 
-                let image = image::RgbImage::from_raw(
-                    converted.width(),
-                    converted.height(),
-                    converted.data(0).into(),
-                )
-                .ok_or(DecodeError::ImageError)?;
-                video_frames.push(image);
+                let buf = Vec::from(converted.data(0));
+                let image = image::RgbImage::from_raw(converted.width(), converted.height(), buf)
+                    .ok_or(DecodeError::ImageError)?;
+
+                let t_width = ((decoded.width() as f32 / decoded.height() as f32)
+                    * self.target_height as f32
+                    * (4.0 / 3.0))
+                    .floor() as u32;
+                video_frames.push(image::imageops::resize(
+                    &image,
+                    t_width,
+                    self.target_height,
+                    image::imageops::FilterType::Triangle,
+                ));
             }
             Ok(())
         };
@@ -114,5 +143,16 @@ impl Decoder {
         self.audio_decoder.send_eof()?;
 
         Ok((video_frames, audio_wave))
+    }
+
+    pub fn into_frame_iter(self, input: Input) -> DecodeIter {
+        DecodeIter {
+            input,
+            video_stream_idx: self.video_stream_idx,
+            video_decoder: self.video_decoder,
+            audio_stream_idx: self.audio_stream_idx,
+            audio_decoder: self.audio_decoder,
+            target_height: self.target_height,
+        }
     }
 }

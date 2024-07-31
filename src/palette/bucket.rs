@@ -19,6 +19,7 @@ pub struct PixelBucket {
     start: usize,
     end: usize,
     max_range: Option<GreatestRange>,
+    sorted: bool,
 }
 
 impl PixelBucket {
@@ -27,6 +28,7 @@ impl PixelBucket {
             start,
             end,
             max_range: Some(max_range_from_slice(&slice[start..end])),
+            sorted: false,
         }
     }
 
@@ -39,11 +41,15 @@ impl PixelBucket {
     }
 
     pub fn sort_by_greatest_range(&mut self, slice: &mut [Rgb<u8>]) {
+        if self.sorted {
+            return;
+        }
         match self.max_range(slice).channel {
             Channel::Red => slice[self.start..self.end].sort_unstable_by_key(|elem| elem.0[0]),
             Channel::Green => slice[self.start..self.end].sort_unstable_by_key(|elem| elem.0[1]),
             Channel::Blue => slice[self.start..self.end].sort_unstable_by_key(|elem| elem.0[2]),
         }
+        self.sorted = true;
     }
 
     pub fn split_at_median(self) -> (Self, Self) {
@@ -53,11 +59,13 @@ impl PixelBucket {
                 start: self.start,
                 end: midpoint,
                 max_range: None,
+                sorted: false,
             },
             Self {
                 start: midpoint,
                 end: self.end,
                 max_range: None,
+                sorted: false,
             },
         )
     }

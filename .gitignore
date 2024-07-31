@@ -1,2 +1,11 @@
+/.vscode
+
 /target
 /frames
+
+*.svg
+*.mp4
+*.mkv
+*.png
+*.jpg
+perf.data*
