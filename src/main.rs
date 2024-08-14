@@ -1,7 +1,4 @@
-use cc_streaming::{
-    cli::ARGS,
-    web::stream,
-};
+use cc_streaming::{cli::ARGS, web::stream};
 
 const DEFAULT_LEVEL: &str = {
     #[cfg(debug_assertions)]

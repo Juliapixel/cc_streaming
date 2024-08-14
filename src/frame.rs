@@ -1,3 +1,6 @@
+//! basically just helper types to store ffmpeg frames which also include extra
+//! info
+
 use std::ops::{Deref, DerefMut};
 
 use ffmpeg_next::frame::{Audio, Video};

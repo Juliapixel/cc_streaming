@@ -1,13 +1,11 @@
+use either::Either;
 use ffmpeg_next::{
-    codec::Context,
-    decoder,
-    format::context::Input,
-    frame::{Audio, Video},
-    software::scaling::Flags,
-    Stream,
+    codec::Context, decoder, format::context::Input, Packet, Stream
 };
-use image::RgbImage;
 use iter::DecodeIter;
+use util::{audio_from_decoder, image_from_decoder};
+
+use crate::frame::{AudioFrame, VideoFrame};
 
 pub mod iter;
 mod util;
@@ -22,6 +20,8 @@ pub enum DecodeError {
     ImageError,
     #[error("audio frame had a length not divisible by 4")]
     AudioFrameLength,
+    #[error("there was no stream of the requested type: {0}")]
+    NoSuchStream(&'static str)
 }
 
 impl From<ffmpeg_next::Error> for DecodeError {
@@ -33,11 +33,120 @@ impl From<ffmpeg_next::Error> for DecodeError {
     }
 }
 
+enum EitherOrBoth {
+    VideoOnly {
+        video_decoder: decoder::Video,
+        video_stream_idx: usize,
+    },
+    AudioOnly {
+        audio_decoder: decoder::Audio,
+        audio_stream_idx: usize,
+    },
+    Both {
+        video_decoder: decoder::Video,
+        video_stream_idx: usize,
+        audio_decoder: decoder::Audio,
+        audio_stream_idx: usize,
+    }
+}
+
+impl EitherOrBoth {
+    pub fn new_both(video_stream: Stream, audio_stream: Stream) -> Result<Self, DecodeError> {
+        let video_ctx = Context::from_parameters(video_stream.parameters())?;
+        let audio_ctx = Context::from_parameters(audio_stream.parameters())?;
+        Ok(Self::Both {
+            video_decoder: video_ctx.decoder().video()?,
+            video_stream_idx: video_stream.index(),
+            audio_decoder: audio_ctx.decoder().audio()?,
+            audio_stream_idx: audio_stream.index(),
+        })
+    }
+
+    pub fn new_audio_only(audio_stream: Stream) -> Result<Self, DecodeError> {
+        let audio_ctx = Context::from_parameters(audio_stream.parameters())?;
+        Ok(Self::AudioOnly {
+            audio_decoder: audio_ctx.decoder().audio()?,
+            audio_stream_idx: audio_stream.index(),
+        })
+    }
+
+    pub fn new_video_only(video_stream: Stream) -> Result<Self, DecodeError> {
+        let video_ctx = Context::from_parameters(video_stream.parameters())?;
+        Ok(Self::VideoOnly {
+            video_decoder: video_ctx.decoder().video()?,
+            video_stream_idx: video_stream.index(),
+        })
+    }
+
+    /// sends packet to approptiate decoder, otherwise discards it
+    pub fn send_packet(&mut self, packet: &Packet) -> Result<(), ffmpeg_next::Error> {
+        let packet_stream_idx = packet.stream();
+        match self {
+            EitherOrBoth::VideoOnly { video_decoder, video_stream_idx } => {
+                if packet_stream_idx != *video_stream_idx {
+                    return Ok(())
+                }
+                video_decoder.send_packet(packet)
+            },
+            EitherOrBoth::AudioOnly { audio_decoder, audio_stream_idx } => {
+                if packet_stream_idx != *audio_stream_idx {
+                    return Ok(())
+                }
+                audio_decoder.send_packet(packet)
+            },
+            EitherOrBoth::Both { video_decoder, video_stream_idx, audio_decoder, audio_stream_idx } => {
+                if packet_stream_idx == *video_stream_idx {
+                    return video_decoder.send_packet(packet)
+                }
+                if packet_stream_idx == *audio_stream_idx {
+                    return audio_decoder.send_packet(packet)
+                }
+                return Ok(())
+            },
+        }
+    }
+
+    pub fn try_receive_any_frame(&mut self) -> Result<Either<VideoFrame, AudioFrame>, DecodeError> {
+        match self {
+            EitherOrBoth::VideoOnly { video_decoder, video_stream_idx } => self.try_receive_video_frame().map(Either::Left),
+            EitherOrBoth::AudioOnly { audio_decoder, audio_stream_idx } => self.try_receive_audio_frame().map(Either::Right),
+            EitherOrBoth::Both { video_decoder, video_stream_idx, audio_decoder, audio_stream_idx } => {
+                todo!()
+            },
+        }
+    }
+
+    pub fn try_receive_video_frame(&mut self) -> Result<VideoFrame, DecodeError> {
+        match self {
+            EitherOrBoth::VideoOnly { video_decoder, video_stream_idx } => {
+                image_from_decoder(video_decoder, todo!(), todo!())
+            },
+            EitherOrBoth::AudioOnly { audio_decoder, audio_stream_idx } => {
+                Err(DecodeError::NoSuchStream("video"))
+            },
+            EitherOrBoth::Both { video_decoder, video_stream_idx, audio_decoder, audio_stream_idx } => {
+                image_from_decoder(video_decoder, todo!(), todo!())
+            },
+        }
+    }
+
+    pub fn try_receive_audio_frame(&mut self) -> Result<AudioFrame, DecodeError> {
+        match self {
+            EitherOrBoth::VideoOnly { video_decoder, video_stream_idx } => {
+                Err(DecodeError::NoSuchStream("video"))
+            },
+            EitherOrBoth::AudioOnly { audio_decoder, audio_stream_idx } => {
+                audio_from_decoder(audio_decoder)
+            },
+            EitherOrBoth::Both { video_decoder, video_stream_idx, audio_decoder, audio_stream_idx } => {
+                audio_from_decoder(audio_decoder)
+            },
+        }
+    }
+}
+
 pub struct Decoder {
-    video_decoder: decoder::Video,
-    video_stream_idx: usize,
-    audio_decoder: decoder::Audio,
-    audio_stream_idx: usize,
+    decoders: EitherOrBoth,
     target_height: u32,
 }
 
@@ -47,111 +156,17 @@ impl Decoder {
         audio_stream: Stream,
         target_height: u32,
     ) -> Result<Self, DecodeError> {
-        let video_ctx = Context::from_parameters(video_stream.parameters())?;
-        let audio_ctx = Context::from_parameters(audio_stream.parameters())?;
+
         Ok(Self {
-            video_decoder: video_ctx.decoder().video()?,
-            video_stream_idx: video_stream.index(),
-            audio_decoder: audio_ctx.decoder().audio()?,
-            audio_stream_idx: audio_stream.index(),
+            decoders: EitherOrBoth::new_both(video_stream, audio_stream)?,
             target_height,
         })
-    }
-
-    #[deprecated]
-    pub fn decode_all(
-        &mut self,
-        input: &mut Input,
-    ) -> Result<(Vec<RgbImage>, Vec<f32>), DecodeError> {
-        let mut video_frames: Vec<image::RgbImage> = Vec::new();
-        let mut audio_wave: Vec<f32> = Vec::new();
-
-        let mut push_vid_frames = |decoder: &mut decoder::Video| -> Result<(), DecodeError> {
-            let mut decoded = Video::empty();
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                let mut scaler = ffmpeg_next::software::scaling::Context::get(
-                    decoded.format(),
-                    decoded.width(),
-                    decoded.height(),
-                    ffmpeg_next::format::Pixel::RGB24,
-                    decoded.width(),
-                    decoded.height(),
-                    Flags::POINT,
-                )?;
-
-                let mut converted = Video::empty();
-                scaler.run(&decoded, &mut converted)?;
-
-                let buf = Vec::from(converted.data(0));
-                let image = image::RgbImage::from_raw(converted.width(), converted.height(), buf)
-                    .ok_or(DecodeError::ImageError)?;
-
-                let t_width = ((decoded.width() as f32 / decoded.height() as f32)
-                    * self.target_height as f32
-                    * (4.0 / 3.0))
-                    .floor() as u32;
-                video_frames.push(image::imageops::resize(
-                    &image,
-                    t_width,
-                    self.target_height,
-                    image::imageops::FilterType::Triangle,
-                ));
-            }
-            Ok(())
-        };
-
-        let mut push_audio_frames = |decoder: &mut decoder::Audio| -> Result<(), DecodeError> {
-            let mut decoded = ffmpeg_next::util::frame::Audio::empty();
-            while decoder.receive_frame(&mut decoded).is_ok() {
-                let mut resampler = decoded.resampler(
-                    ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar),
-                    ffmpeg_next::ChannelLayout::MONO,
-                    24000,
-                )?;
-                let mut resampled = Audio::empty();
-                resampler.run(&decoded, &mut resampled)?;
-
-                let buf = resampled.data(0);
-                if buf.len() % 4 != 0 {
-                    return Err(DecodeError::AudioFrameLength);
-                }
-                // HEEEEEEEEELP
-                unsafe {
-                    let samples =
-                        core::slice::from_raw_parts::<f32>(buf.as_ptr() as _, buf.len() / 4);
-                    audio_wave.extend_from_slice(samples);
-                }
-            }
-
-            Ok(())
-        };
-
-        for (stream, packet) in input.packets() {
-            if stream.index() == self.video_stream_idx {
-                self.video_decoder.send_packet(&packet)?;
-                push_vid_frames(&mut self.video_decoder)?;
-            }
-            if stream.index() == self.audio_stream_idx {
-                self.audio_decoder.send_packet(&packet)?;
-                push_audio_frames(&mut self.audio_decoder)?;
-            }
-        }
-
-        push_vid_frames(&mut self.video_decoder)?;
-        push_audio_frames(&mut self.audio_decoder)?;
-        self.video_decoder.send_eof()?;
-        self.audio_decoder.send_eof()?;
-
-        Ok((video_frames, audio_wave))
     }
 
     pub fn into_frame_iter(self, input: Input) -> DecodeIter {
         DecodeIter {
             input,
-            video_stream_idx: self.video_stream_idx,
-            video_decoder: self.video_decoder,
-            audio_stream_idx: self.audio_stream_idx,
-            audio_decoder: self.audio_decoder,
+            decoders: self.decoders,
             target_height: self.target_height,
         }
     }

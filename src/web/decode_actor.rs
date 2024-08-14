@@ -6,7 +6,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::{
     decoder::{iter::DecodeIter, DecodeError},
-    dfpwm::DfwpmEncoder,
+    dfpwm::DfpwmEncoder,
     palette::Palette,
 };
 
@@ -25,46 +25,50 @@ impl DecodeActor {
 
         // basically just does all the decoding in regular blocking code and
         // sends it over to the async code via channels (look up to see channel)
-        std::thread::spawn(move || loop {
-            match decode_iter.next() {
-                Some(Ok(Either::Left(video_frame))) => {
-                    let palette = Palette::new(16, &video_frame);
-                    let mut lines: Vec<String> = (0..video_frame.height())
-                        .map(|_| String::with_capacity(video_frame.width() as usize))
-                        .collect();
-                    for (i, pal_idx) in palette.index_iter(&video_frame).enumerate() {
-                        let line = i / video_frame.width() as usize;
-                        lines[line].push(char::from_digit(pal_idx as u32, 16).unwrap());
+        std::thread::spawn(move || {
+            let mut dfpwm_encoder = DfpwmEncoder::new();
+            loop {
+                match decode_iter.next() {
+                    Some(Ok(Either::Left(video_frame))) => {
+                        let palette = Palette::new(16, &video_frame);
+                        let mut lines: Vec<String> = (0..video_frame.height())
+                            .map(|_| String::with_capacity(video_frame.width() as usize))
+                            .collect();
+                        for (i, pal_idx) in palette.index_iter(&video_frame).enumerate() {
+                            let line = i / video_frame.width() as usize;
+                            lines[line].push(char::from_digit(pal_idx as u32, 16).unwrap());
+                        }
+                        if tx
+                            .blocking_send(Either::Left(StreamVideoFrame {
+                                palette: palette
+                                    .iter()
+                                    .map(|pix| [pix.0[0], pix.0[1], pix.0[2]])
+                                    .collect(),
+                                rows: lines,
+                            }))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                    if tx
-                        .blocking_send(Either::Left(StreamVideoFrame {
-                            palette: palette
-                                .iter()
-                                .map(|pix| [pix.0[0], pix.0[1], pix.0[2]])
-                                .collect(),
-                            rows: lines,
-                        }))
-                        .is_err()
-                    {
+                    Some(Ok(Either::Right(audio_frame))) => {
+                        if tx
+                            .blocking_send(Either::Right(StreamAudioFrame {
+                                samples: dfpwm_encoder
+                                    .encode(audio_frame.samples().iter().copied()),
+                            }))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Some(Err(DecodeError::NoFramesYet)) => (),
+                    Some(Err(e)) => {
+                        log::error!("{e}");
                         break;
                     }
+                    None => break,
                 }
-                Some(Ok(Either::Right(audio_frame))) => {
-                    if tx
-                        .blocking_send(Either::Right(StreamAudioFrame {
-                            samples: DfwpmEncoder::encode(&audio_frame),
-                        }))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Some(Err(DecodeError::NoFramesYet)) => (),
-                Some(Err(e)) => {
-                    log::error!("{e}");
-                    break;
-                }
-                None => break,
             }
         });
         Self { frame_receiver: rx }
@@ -76,7 +80,7 @@ impl ActorFuture<StreamWsHandler> for DecodeActor {
 
     fn poll(
         mut self: std::pin::Pin<&mut Self>,
-        srv: &mut StreamWsHandler,
+        _srv: &mut StreamWsHandler,
         ctx: &mut <StreamWsHandler as actix::Actor>::Context,
         task: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
