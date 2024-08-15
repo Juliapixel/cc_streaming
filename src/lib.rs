@@ -1,6 +1,3 @@
-#![feature(async_iterator)]
-#![feature(iterator_try_collect)]
-
 pub mod cli;
 pub mod decoder;
 pub mod dfpwm;
