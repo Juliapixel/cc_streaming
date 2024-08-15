@@ -3,8 +3,8 @@
 
 pub mod cli;
 pub mod decoder;
-pub mod dimensions;
 pub mod dfpwm;
+pub mod dimensions;
 pub mod frame;
 pub mod palette;
 pub mod web;

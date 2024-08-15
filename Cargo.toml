@@ -8,8 +8,8 @@ opt-level = 0
 debug = "full"
 
 [profile.release]
-lto = "fat"
-debug = "full"
+lto = "thin"
+debug = "none"
 
 [target.x86_64-unknown-linux-gnu]
 linker = "/usr/bin/clang"
@@ -18,7 +18,7 @@ rustflags = ["-Clink-arg=-fuse-ld=lld", "-Clink-arg=-Wl,--no-rosegment"]
 [dependencies]
 m3u8-rs = "6.0"
 ffmpeg-next = "7.0"
-reqwest = { version = "0.12", features = ["brotli", "charset", "deflate", "gzip", "http2", "json", "rustls-tls"], default-features = false }
+# reqwest = { version = "0.12", features = ["brotli", "charset", "deflate", "gzip", "http2", "json", "rustls-tls"], default-features = false }
 tokio = { version = "1.38", features = ["full"] }
 thiserror = "1.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -33,9 +33,10 @@ either = "1.13"
 kd-tree = "0.6"
 futures = "0.3"
 actix-web = "4.8"
-actix-web-actors = "4.3"
-actix = "0.13.5"
-serde = { version = "1.0.204", features = ["derive"] }
-serde_json = "1.0.120"
-url = { version = "2.5.2", features = ["serde"] }
-bitvec = "1.0.1"
+actix-ws = "0.3"
+actix = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = { version = "2.5", features = ["serde"] }
+bitvec = "1.0"
+rand = "0.8"

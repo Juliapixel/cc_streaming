@@ -2,14 +2,11 @@ use either::Either;
 
 use crate::frame::{AudioFrame, VideoFrame};
 
-use super::{
-    DecodeError, EitherOrBoth,
-};
+use super::{DecodeError, Decoder};
 
 pub struct DecodeIter {
     pub(super) input: ffmpeg_next::format::context::Input,
-    pub(super) decoders: EitherOrBoth,
-    pub(super) target_height: u32,
+    pub(super) decoders: Decoder,
 }
 
 impl Iterator for DecodeIter {
@@ -17,8 +14,10 @@ impl Iterator for DecodeIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((_, packet)) = self.input.packets().next() {
-            self.decoders.send_packet(&packet);
-            return Some(self.decoders.try_receive_any_frame())
+            if self.decoders.send_packet(&packet).is_err() {
+                return None;
+            }
+            return Some(self.decoders.try_receive_any_frame());
         }
 
         None
