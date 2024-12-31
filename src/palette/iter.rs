@@ -9,7 +9,7 @@ pub struct PaletteIndexIter<'a, T: Deref<Target = [Rgb<u8>]>> {
     pub(super) pixels: EnumeratePixels<'a, Rgb<u8>>,
 }
 
-impl<'a, T: Deref<Target = [Rgb<u8>]>> Iterator for PaletteIndexIter<'a, T> {
+impl<T: Deref<Target = [Rgb<u8>]>> Iterator for PaletteIndexIter<'_, T> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {

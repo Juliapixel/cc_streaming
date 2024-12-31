@@ -87,6 +87,12 @@ impl Palette {
         for i in buckets {
             palette.push(i.average_colors(&pixels))
         }
+        palette.sort_unstable_by(|c1, c2| {
+            from_rgb_to_oklab(*c2)
+                .l
+                .partial_cmp(&from_rgb_to_oklab(*c1).l)
+                .unwrap()
+        });
 
         Self { palette }
     }

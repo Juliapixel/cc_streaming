@@ -4,7 +4,7 @@
 use std::ops::{Deref, DerefMut};
 
 use ffmpeg_next::frame::{Audio, Video};
-use image::RgbImage;
+use image::{GenericImageView, Rgb, RgbImage};
 
 use crate::decoder::DecodeError;
 
@@ -40,12 +40,53 @@ impl VideoFrame {
         let mut converted = Video::empty();
         converter.run(decoded, &mut converted)?;
 
-        let buf = Vec::from(converted.data(0));
-        let image = image::RgbImage::from_raw(converted.width(), converted.height(), buf)
-            .ok_or(DecodeError::ImageError)?;
+        let flat_image = image::FlatSamples {
+            layout: image::flat::SampleLayout {
+                channels: 3,
+                channel_stride: 1,
+                width: converted.width(),
+                width_stride: 3,
+                height: converted.height(),
+                height_stride: converted.stride(0),
+            },
+            samples: converted.data(0).to_owned(),
+            color_hint: None,
+        };
+        let image = {
+            match flat_image.try_into_buffer::<Rgb<u8>>() {
+                Ok(ok) => ok,
+                Err((_, samples)) => {
+                    let view = samples
+                        .as_view::<Rgb<u8>>()
+                        .map_err(|_| DecodeError::ImageError)?;
+                    let mut new_buf =
+                        image::ImageBuffer::<Rgb<u8>, _>::new(view.width(), view.height());
+                    view.pixels()
+                        .for_each(|(x, y, pix)| new_buf.put_pixel(x, y, pix));
+                    new_buf
+                }
+            }
+        };
 
-        let image =
-            image::imageops::resize(&image, width, height, image::imageops::FilterType::Nearest);
+        let mut target_image = fast_image_resize::images::Image::new(
+            width,
+            height,
+            fast_image_resize::PixelType::U8x3,
+        );
+        let mut resizer = fast_image_resize::Resizer::new();
+        resizer
+            .resize(
+                &image::DynamicImage::from(image),
+                &mut target_image,
+                &fast_image_resize::ResizeOptions {
+                    algorithm: fast_image_resize::ResizeAlg::Convolution(
+                        fast_image_resize::FilterType::Hamming,
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let image = image::RgbImage::from_vec(width, height, target_image.into_vec()).unwrap();
 
         let ts = decoded.pts().unwrap() as f64 * time_base;
 
@@ -89,7 +130,7 @@ impl AudioFrame {
         let mut resampler = decoded.resampler(
             ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar),
             ffmpeg_next::ChannelLayout::MONO,
-            44100,
+            48000,
         )?;
         let mut resampled = Audio::empty();
         resampler.run(decoded, &mut resampled)?;

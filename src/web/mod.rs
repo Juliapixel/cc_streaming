@@ -1,10 +1,11 @@
-use std::time::Duration;
+use std::{io::Cursor, time::Duration};
 
 use actix_web::HttpRequest;
 use either::Either;
 use ffmpeg_next::format::input;
 use futures::{FutureExt, StreamExt};
 use rand::Rng;
+use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use ws::{StreamAudioFrame, StreamVideoFrame};
 
@@ -12,8 +13,7 @@ use crate::{
     decoder::{DecodeError, Decoder},
     dfpwm::DfpwmEncoder,
     dimensions::ResolutionHint,
-    palette::Palette,
-    ytdl::get_stream_url,
+    ytdl::YtDlpInfo,
 };
 
 pub mod ws;
@@ -25,23 +25,105 @@ pub struct StreamQuery {
     height: u32,
 }
 
+static REQWEST_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
+// TODO: make this configurable
+static IMAGE_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(32);
+
+pub async fn image(
+    query: actix_web::web::Query<StreamQuery>,
+) -> Result<actix_web::HttpResponse, actix_web::Error> {
+    let _semaphore = IMAGE_SEMAPHORE.acquire().await.expect("this is static cuh");
+    let resp = REQWEST_CLIENT
+        .get(query.url.clone())
+        .header(ACCEPT, "image/png, image/webp, image/gif")
+        .send()
+        .await
+        .map_err(|e| actix_web::error::ErrorNotFound(e.without_url()))?;
+
+    let bytes;
+
+    let format = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|h| image::ImageFormat::from_mime_type(String::from_utf8_lossy(h.as_bytes())))
+        .or_else({
+            bytes = resp
+                .bytes()
+                .await
+                .map_err(actix_web::error::ErrorBadRequest)?;
+            || {
+                image::ImageReader::new(Cursor::new(&bytes))
+                    .with_guessed_format()
+                    .ok()?
+                    .format()
+            }
+        });
+
+    if let Some(format) = format {
+        let image =
+            tokio::task::spawn_blocking(move || -> Result<StreamVideoFrame, image::ImageError> {
+                let image = image::load_from_memory_with_format(&bytes, format)?;
+
+                let res_hint = ResolutionHint::Fit {
+                    width: query.width,
+                    height: query.height,
+                    pixel_aspect: const { 2.0 / 3.0 },
+                };
+                let (width, height) = res_hint.get_target_res(image.width(), image.height());
+
+                Ok(StreamVideoFrame::from_image_scaled(
+                    image.into_rgb8(),
+                    width,
+                    height,
+                ))
+            })
+            .await
+            .unwrap()
+            .map_err(actix_web::error::ErrorBadRequest)?;
+
+        Ok(actix_web::HttpResponse::Ok().json(image))
+    } else {
+        Err(actix_web::error::ErrorBadRequest(
+            "failed to determine image format",
+        ))
+    }
+}
+
+// TODO: make this configurable
+static STREAM_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+
 pub async fn stream(
     req: HttpRequest,
     body: actix_web::web::Payload,
     query: actix_web::web::Query<StreamQuery>,
 ) -> Result<actix_web::HttpResponse, actix_web::Error> {
-    log::debug!("starting stream for {}", &query.url);
+    let semaphore = STREAM_SEMAPHORE.try_acquire();
+    if semaphore.is_err() {
+        return Err(actix_web::error::ErrorServiceUnavailable(
+            "too many streams open at the same time",
+        ));
+    }
+
+    log::info!("starting stream for {}", &query.url);
     let (resp, mut session, mut stream) = actix_ws::handle(&req, body)?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(5);
 
+    let ytdl_info = YtDlpInfo::new(&query.url).await?;
+
     // basically just does all the decoding in regular blocking code and
     // sends it over to the async code via channels (look up to see channel)
-    tokio::spawn(async move {
-        let url = get_stream_url(&query.url).await;
-        std::thread::spawn(move || {
-            decode_thread(tx, url.first().unwrap(), query.width, query.height)
-        })
+    std::thread::spawn({
+        let url = ytdl_info
+            .best_video_match(query.width, query.height)
+            .map(|u| u.parse().unwrap())
+            .unwrap();
+
+        move || {
+            decode_thread(tx, &url, query.width, query.height);
+        }
     });
 
     // receive frames received from sync code and sends it over to client
@@ -71,6 +153,7 @@ pub async fn stream(
                 }
             }
 
+            log::info!("media over, closing connection");
             let _ = session.close(None).await;
         }
     });
@@ -98,8 +181,12 @@ pub async fn stream(
                                 log::trace!("received ping");
                                 session.pong(&ping).await
                             },
-                            actix_ws::Message::Pong(pong) => todo!("ponging"),
-                            actix_ws::Message::Close(_) => break,
+                            actix_ws::Message::Pong(_pong) => Ok(()),
+                            actix_ws::Message::Close(reason) => {
+                                log::info!("session closed: {:?}", reason.map(|r| r.code));
+
+                                break;
+                            },
                             actix_ws::Message::Nop => Ok(()),
                         }
                     } else {
@@ -126,6 +213,7 @@ fn decode_thread(
     width: u32,
     height: u32,
 ) {
+    // FIXME: allow different urls for audio and video streams and dont require both audio and video
     let ictx = input(url.as_str()).unwrap();
     let vid_stream = ictx
         .streams()
@@ -151,25 +239,10 @@ fn decode_thread(
     loop {
         match decode_iter.next() {
             Some(Ok(Either::Left(video_frame))) => {
-                let palette = Palette::new(16, &video_frame);
-
-                let mut lines: Vec<String> = (0..video_frame.height())
-                    .map(|_| String::with_capacity(video_frame.width() as usize))
-                    .collect();
-
-                for (i, pal_idx) in palette.index_iter(&video_frame).enumerate() {
-                    let line = i / video_frame.width() as usize;
-                    lines[line].push(char::from_digit(pal_idx as u32, 16).unwrap());
-                }
-
                 if tx
-                    .blocking_send(Either::Left(StreamVideoFrame {
-                        palette: palette
-                            .into_iter()
-                            .map(|pix| [pix.0[0], pix.0[1], pix.0[2]])
-                            .collect(),
-                        rows: lines,
-                    }))
+                    .blocking_send(Either::Left(StreamVideoFrame::from_image(
+                        video_frame.image(),
+                    )))
                     .is_err()
                 {
                     break;
