@@ -1,27 +1,35 @@
-use std::ops::RangeInclusive;
-
 use image::Rgb;
 
 #[derive(Debug)]
+#[repr(align(8))]
 pub struct Ranges {
-    r: RangeInclusive<u8>,
-    g: RangeInclusive<u8>,
-    b: RangeInclusive<u8>,
+    r_min: u8,
+    r_max: u8,
+    g_min: u8,
+    g_max: u8,
+    b_min: u8,
+    b_max: u8,
 }
 
 impl Ranges {
     pub fn new(pixel: Rgb<u8>) -> Self {
         Self {
-            r: pixel.0[0]..=pixel.0[0],
-            g: pixel.0[1]..=pixel.0[1],
-            b: pixel.0[2]..=pixel.0[2],
+            r_min: pixel.0[0],
+            r_max: pixel.0[0],
+            g_min: pixel.0[1],
+            g_max: pixel.0[1],
+            b_min: pixel.0[2],
+            b_max: pixel.0[2],
         }
     }
 
     pub fn update(&mut self, new: Rgb<u8>) {
-        self.r = new.0[0].min(*self.r.start())..=new.0[0].max(*self.r.end());
-        self.g = new.0[1].min(*self.g.start())..=new.0[1].max(*self.g.end());
-        self.b = new.0[2].min(*self.b.start())..=new.0[2].max(*self.b.end());
+        self.r_min = new.0[0].min(self.r_min);
+        self.r_max = new.0[0].max(self.r_max);
+        self.g_min = new.0[1].min(self.g_min);
+        self.g_max = new.0[1].max(self.g_max);
+        self.b_min = new.0[2].min(self.b_min);
+        self.b_max = new.0[2].max(self.b_max);
     }
 }
 
@@ -41,28 +49,23 @@ pub enum Channel {
 
 impl From<Ranges> for GreatestRange {
     fn from(value: Ranges) -> Self {
-        let r_range = value.r.end() - value.r.start();
-        let g_range = value.g.end() - value.g.start();
-        let b_range = value.b.end() - value.b.start();
+        let r_range = value.r_max - value.r_min;
+        let g_range = value.g_max - value.g_min;
+        let b_range = value.b_max - value.b_min;
 
-        let max_range = *[r_range, g_range, b_range].iter().max().unwrap();
-        if max_range == r_range {
-            Self {
-                range: max_range,
-                channel: Channel::Red,
-            }
-        } else if max_range == g_range {
-            Self {
-                range: max_range,
-                channel: Channel::Green,
-            }
-        } else if max_range == b_range {
-            Self {
-                range: max_range,
-                channel: Channel::Blue,
-            }
-        } else {
-            unreachable!("what?");
+        let (max_idx, max_range) = [r_range, g_range, b_range]
+            .into_iter()
+            .enumerate()
+            .max_by_key(|i| i.1)
+            .unwrap();
+        Self {
+            range: max_range,
+            channel: match max_idx {
+                0 => Channel::Red,
+                1 => Channel::Green,
+                2 => Channel::Blue,
+                _ => unreachable!("what?"),
+            },
         }
     }
 }
