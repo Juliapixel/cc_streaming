@@ -136,12 +136,8 @@ impl AudioFrame {
         resampler.run(decoded, &mut resampled)?;
 
         let buf = resampled.data(0);
-        if buf.len() % 4 != 0 {
-            return Err(DecodeError::AudioFrameLength);
-        }
-        // HEEEEEEEEELP
-        let samples =
-            unsafe { core::slice::from_raw_parts::<f32>(buf.as_ptr() as _, buf.len() / 4) };
+        let samples = bytemuck::try_cast_slice::<u8, f32>(buf)
+            .map_err(|_| DecodeError::AudioFrameLength)?;
 
         let ts = decoded.pts().unwrap() as f64 * time_base;
 
