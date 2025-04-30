@@ -1,24 +1,19 @@
 [package]
 name = "cc_streaming"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [profile.dev]
 opt-level = 0
 debug = "full"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 debug = "none"
 
-[target.x86_64-unknown-linux-gnu]
-linker = "/usr/bin/clang"
-rustflags = ["-Clink-arg=-fuse-ld=lld", "-Clink-arg=-Wl,--no-rosegment", "-Ctarget-cpu=native"]
-
 [dependencies]
-m3u8-rs = "6.0"
-ffmpeg-next = "7.0"
-# reqwest = { version = "0.12", features = ["brotli", "charset", "deflate", "gzip", "http2", "json", "rustls-tls"], default-features = false }
+scuffle-ffmpeg = { git = "https://github.com/ScuffleCloud/scuffle", rev = "6057eef62004cb21541136f933068fc25ff7e44b" }
+reqwest = { version = "0.12", features = ["brotli", "charset", "deflate", "gzip", "http2", "json", "rustls-tls"], default-features = false }
 tokio = { version = "1.38", features = ["full"] }
 thiserror = "1.0"
 image = { version = "0.25" }
@@ -41,5 +36,5 @@ url = { version = "2.5", features = ["serde"] }
 bitvec = "1.0"
 rand = "0.8"
 fast_image_resize = { version = "5.1.0", features = ["image"] }
-reqwest = "0.12.9"
 bytemuck = "1.21.0"
+heapless = "0.8.0"

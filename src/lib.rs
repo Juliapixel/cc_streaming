@@ -6,3 +6,4 @@ pub mod frame;
 pub mod palette;
 pub mod web;
 pub mod ytdl;
+pub mod util;

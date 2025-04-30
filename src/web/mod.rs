@@ -2,18 +2,15 @@ use std::{io::Cursor, time::Duration};
 
 use actix_web::HttpRequest;
 use either::Either;
-use ffmpeg_next::format::input;
 use futures::{FutureExt, StreamExt};
 use rand::Rng;
 use reqwest::header::ACCEPT;
+use scuffle_ffmpeg::{AVMediaType, io::Input};
 use serde::Deserialize;
 use ws::{StreamAudioFrame, StreamVideoFrame};
 
 use crate::{
-    decoder::{DecodeError, Decoder},
-    dfpwm::DfpwmEncoder,
-    dimensions::ResolutionHint,
-    ytdl::YtDlpInfo,
+    decoder::{DecodeError, Decoder}, dfpwm::DfpwmEncoder, dimensions::ResolutionHint, util::EightIter, ytdl::YtDlpInfo
 };
 
 pub mod ws;
@@ -119,7 +116,7 @@ pub async fn stream(
         let url = ytdl_info
             .best_video_match(query.width, query.height)
             .map(|u| u.parse().unwrap())
-            .unwrap();
+            .unwrap_or(ytdl_info.url.parse().unwrap());
 
         move || {
             decode_thread(tx, &url, query.width, query.height);
@@ -213,29 +210,27 @@ fn decode_thread(
     width: u32,
     height: u32,
 ) {
-    // FIXME: allow different urls for audio and video streams and dont require both audio and video
-    let ictx = input(url.as_str()).unwrap();
-    let vid_stream = ictx
-        .streams()
-        .best(ffmpeg_next::media::Type::Video)
-        .unwrap();
-    let aud_stream = ictx
-        .streams()
-        .best(ffmpeg_next::media::Type::Audio)
-        .unwrap();
-    let vid_rate: f64 = vid_stream.rate().into();
+    // TODO: allow different urls for audio and video streams
+    let ictx = Input::open(url.as_str()).unwrap();
+    let streams = ictx.streams();
+    let vid_stream = streams.best(AVMediaType::Video);
+    let aud_stream = streams.best(AVMediaType::Audio);
+    let vid_rate: Option<f64> = vid_stream.as_ref().map(|i| i.avg_frame_rate().into());
 
-    log::debug!("video frame rate: {}", vid_rate);
+    log::debug!("video frame rate: {:?}", vid_rate);
 
-    let decoder = Decoder::new_video_only(
+    let decoder = Decoder::new_maybe(
         vid_stream,
+        aud_stream,
         ResolutionHint::fit(width, height, const { 2.0 / 3.0 }),
     )
-    .unwrap();
+    .expect("Failed to create new Decoder");
 
     let mut decode_iter = decoder.into_frame_iter(ictx);
 
     let mut dfpwm_encoder = DfpwmEncoder::new();
+    let mut sample_iter = EightIter::new();
+
     loop {
         match decode_iter.next() {
             Some(Ok(Either::Left(video_frame))) => {
@@ -249,9 +244,10 @@ fn decode_thread(
                 }
             }
             Some(Ok(Either::Right(audio_frame))) => {
+                sample_iter.feed_iter(audio_frame.samples().iter().copied());
                 if tx
                     .blocking_send(Either::Right(StreamAudioFrame {
-                        samples: dfpwm_encoder.encode(audio_frame.samples().iter().copied()),
+                        samples: dfpwm_encoder.encode(&mut sample_iter),
                     }))
                     .is_err()
                 {
@@ -263,7 +259,7 @@ fn decode_thread(
                 log::error!("{e}");
                 break;
             }
-            None => break,
+            None => (),
         }
     }
 }

@@ -1,6 +1,6 @@
 ---@param end_time integer time in milliseconds, from utc
 local function spinSleepUntil(end_time)
-    while os.epoch("utc") < end_time - 1000 do
+    while os.epoch("utc") < end_time - 500 do
         coroutine.yield()
     end
     while os.epoch("utc") < end_time do end
@@ -298,7 +298,6 @@ function MonitorArray:rows()
     return ipairs(self.monitor_rows), self, 0
 end
 
-
 MARRAY_LAYOUT_SETTING = "marray_layout"
 
 ---@return MonitorArray?
@@ -412,7 +411,77 @@ local function findAllMonitors()
     return monitors
 end
 
+
+---@class Dequeue<T>: {buf: T[]}
+---@field start integer
+---@field len integer
+---@field cap integer
+Dequeue = {}
+
+---@generic T
+---@return Dequeue<T>
+---@param cap integer
+function Dequeue:new(cap)
+    ---@class Dequeue<T>
+    local t = {
+        start = 1,
+        len = 0,
+        cap = cap,
+        buf = {}
+    }
+    setmetatable(t, self)
+    self.__index = self
+
+    ---@generic T
+    ---@param val T
+    ---@return boolean
+    t.push_back = function (val)
+        if t.len == cap then
+            return false
+        end
+        t.buf[((t.start - 1 + t.len) % t.cap) + 1] = val
+        t.len = t.len + 1
+        return true
+    end
+
+    ---@generic T
+    ---@param val T
+    ---@return boolean
+    t.push_front = function (val)
+        if t.len == cap then
+            return false
+        end
+        local idx = nil
+        if t.start == 1 then
+            idx = t.start + t.len - 1
+        else
+            idx = t.start - 1
+        end
+        t.buf[idx] = val
+        t.start = idx
+        t.len = t.len + 1
+        return true
+    end
+
+    ---@generic T
+    ---@return T | nil
+    t.pop_front = function ()
+        if t.len == 0 then
+            return nil
+        end
+        local ret = t.buf[t.start]
+        t.start = (t.start % t.cap) + 1
+        t.len = t.len - 1
+        return ret
+    end
+
+    return t
+end
+
 local monitors = findAllMonitors()
+---@type ccTweaked.peripheral.Speaker | nil
+local speaker = peripheral.find("speaker")
+local default_term = term.current()
 local output = term.current()
 if #monitors == 1 then
     output = findAllMonitors[1]
@@ -420,10 +489,16 @@ elseif #monitors > 1 then
     output = MonitorArray.loadFromSettings() or MonitorArray:setup(monitors)
 end
 
-local width, height = output.getSize()
-print(width, height)
+local function pcPrint(...)
+    local prev = term.current()
+    term.redirect(default_term)
+    print(...)
+    term.redirect(prev)
+end
 
-local stream_url = nil
+local width, height = output.getSize()
+
+local stream_url = arg[1]
 while stream_url == nil or stream_url == "" do
     print("stream url: ")
     stream_url = read()
@@ -436,39 +511,117 @@ print("listening")
 
 term.redirect(output)
 
-local function listen()
-    while true do
-        local message, is_binary = ws.receive()
-        if message == nil then break end
-        if is_binary then
-            goto continue
-        end
-        local ending = os.epoch("utc") + 33;
-        ---@type {palette: integer[][], rows: string[]}
-        local message, errorMessage = textutils.unserialiseJSON(message);
-        assert(message, errorMessage)
-        for i, value in ipairs(message.palette) do
-            term.setPaletteColor(
-                2 ^ (i - 1),
-                colors.packRGB(
-                    value[1] / 255.0,
-                    value[2] / 255.0,
-                    value[3] / 255.0
-                )
+local function displayFrame(frame)
+    for i, value in ipairs(frame.palette) do
+        term.setPaletteColor(
+            2 ^ (i - 1),
+            colors.packRGB(
+                value[1] / 255.0,
+                value[2] / 255.0,
+                value[3] / 255.0
             )
-        end
-        for i, value in ipairs(message.rows) do
-            term.setCursorPos(1, i)
-            term.blit(string.rep(" ", string.len(value)), value, value)
-        end
-        spinSleepUntil(ending)
-        ::continue::
+        )
     end
+    for i, value in ipairs(frame.rows) do
+        term.setCursorPos(1, i)
+        term.blit(string.rep(" ", string.len(value)), value, value)
+    end
+end
+
+local dfpwm = require("cc.audio.dfpwm")
+
+local decoder = dfpwm.make_decoder()
+
+local ws_closed = false
+
+if arg.test then
+    local test_q = Dequeue:new(10)
+    test_q.push_back(123)
+    print(textutils.serialize(test_q.buf))
+    print(test_q.cap)
+    print(test_q.len)
+    print(test_q.start)
+    assert(test_q.pop_front() == 123, "AAA")
+    test_q.push_back(321)
+    test_q.push_back(456)
+    assert(test_q.pop_front() == 321, "BBB")
 end
 
 local function wait_for_close()
     local _event, _url, message = os.pullEvent("websocket_close")
     print(message)
+    ws_closed = true
 end
 
-parallel.waitForAny(listen, wait_for_close)
+---@type Dequeue<string>
+local samples = Dequeue:new(25)
+local waiting_for_samples = true
+
+local function wait_for_audio()
+    if waiting_for_samples then
+        os.pullEvent("new_samples")
+    end
+
+    local popped = samples.pop_front()
+    if popped == nil then
+        waiting_for_samples = true
+        pcPrint("waiting for samples")
+        return
+    end
+    local decoded = decoder(popped)
+    if not speaker.playAudio(decoded, 1) then
+        os.pullEvent("speaker_audio_empty")
+    else
+        local popped = samples.pop_front()
+        if popped == nil then
+            waiting_for_samples = true
+            pcPrint("waiting for samples")
+            return
+        end
+        local decoded = decoder(popped)
+        if not speaker.playAudio(decoded, 1) then
+            samples.push_front(popped)
+        end
+    end
+    waiting_for_samples = true
+end
+
+local sample_acc = ""
+
+local function read_ws()
+    local _e, _url, message, is_binary = os.pullEvent("websocket_message")
+    if message == nil then
+        ws_closed = true
+    end
+    if is_binary then
+        return
+    end
+    local ending = os.epoch("utc") + 33;
+    ---@type {palette: integer[][], rows: string[]} | {samples: integer[]}
+    local message, errorMessage = textutils.unserialiseJSON(message);
+    assert(message, errorMessage)
+    if message.palette ~= nil then
+        displayFrame(message)
+        spinSleepUntil(ending)
+    elseif message.samples ~= nil and speaker ~= nil then
+        for i=1, #message.samples do
+            if #sample_acc < 1024 * 8 then
+                sample_acc = sample_acc .. string.char(message.samples[i])
+            else
+                if samples.push_back(sample_acc) == false then
+                    pcPrint("HELp")
+                end
+                pcPrint("sent buf of len", #sample_acc)
+                sample_acc = "" .. string.char(message.samples[i])
+                os.queueEvent("new_samples")
+            end
+        end
+    end
+end
+
+while true do
+    parallel.waitForAny(read_ws, wait_for_close, wait_for_audio)
+    if ws_closed then
+        break
+    end
+end

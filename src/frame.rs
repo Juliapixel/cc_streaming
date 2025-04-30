@@ -3,8 +3,13 @@
 
 use std::ops::{Deref, DerefMut};
 
-use ffmpeg_next::frame::{Audio, Video};
 use image::{GenericImageView, Rgb, RgbImage};
+use scuffle_ffmpeg::{
+    AVSampleFormat,
+    frame::{AudioChannelLayout, AudioFrame as Audio, VideoFrame as Video},
+    resampler::Resampler,
+    scaler::VideoScaler,
+};
 
 use crate::decoder::DecodeError;
 
@@ -35,21 +40,36 @@ impl VideoFrame {
         width: u32,
         height: u32,
     ) -> Result<Self, DecodeError> {
-        let mut converter = decoded.converter(ffmpeg_next::format::Pixel::RGB24)?;
+        let mut converter = VideoScaler::new(
+            decoded.width() as i32,
+            decoded.height() as i32,
+            decoded.format(),
+            decoded.width() as i32,
+            decoded.height() as i32,
+            scuffle_ffmpeg::AVPixelFormat::Rgb24,
+        )?;
 
-        let mut converted = Video::empty();
-        converter.run(decoded, &mut converted)?;
+        let converted = converter.process(decoded)?;
+
+        let samples = {
+            let mut tmp_samples = Vec::new();
+            let data = converted.data(0).unwrap();
+            for row in 0..data.height() {
+                tmp_samples.extend_from_slice(data.get_row(row as usize).unwrap());
+            }
+            tmp_samples
+        };
 
         let flat_image = image::FlatSamples {
             layout: image::flat::SampleLayout {
                 channels: 3,
                 channel_stride: 1,
-                width: converted.width(),
+                width: converted.width() as u32,
                 width_stride: 3,
-                height: converted.height(),
-                height_stride: converted.stride(0),
+                height: converted.height() as u32,
+                height_stride: converted.linesize(0).unwrap() as usize,
             },
-            samples: converted.data(0).to_owned(),
+            samples,
             color_hint: None,
         };
         let image = {
@@ -107,12 +127,12 @@ impl VideoFrame {
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
-    samples: Vec<f32>,
+    samples: Vec<i8>,
     timestamp: f64,
 }
 
 impl Deref for AudioFrame {
-    type Target = Vec<f32>;
+    type Target = Vec<i8>;
 
     fn deref(&self) -> &Self::Target {
         &self.samples
@@ -127,17 +147,25 @@ impl DerefMut for AudioFrame {
 
 impl AudioFrame {
     pub fn from_ffmpeg(decoded: &Audio, time_base: f64) -> Result<Self, DecodeError> {
-        let mut resampler = decoded.resampler(
-            ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Planar),
-            ffmpeg_next::ChannelLayout::MONO,
+        let mut resampler = Resampler::new(
+            decoded.channel_layout(),
+            decoded.format(),
+            decoded.sample_rate(),
+            AudioChannelLayout::new(1)?,
+            AVSampleFormat::U8,
             48000,
         )?;
-        let mut resampled = Audio::empty();
-        resampler.run(decoded, &mut resampled)?;
 
-        let buf = resampled.data(0);
-        let samples = bytemuck::try_cast_slice::<u8, f32>(buf)
-            .map_err(|_| DecodeError::AudioFrameLength)?;
+        let mut resampled = resampler.process(decoded)?;
+
+        let buf = resampled
+            .data_mut(0)
+            .expect("no data[0] present in AudioFrame... wtf?");
+
+        let samples =
+            bytemuck::try_cast_slice_mut::<u8, i8>(buf).map_err(|_| DecodeError::AudioFrameLength)?;
+
+        samples.iter_mut().for_each(|s| *s ^= 0x80u8 as i8);
 
         let ts = decoded.pts().unwrap() as f64 * time_base;
 
@@ -151,7 +179,7 @@ impl AudioFrame {
         self.timestamp
     }
 
-    pub fn samples(&self) -> &[f32] {
+    pub fn samples(&self) -> &[i8] {
         &self.samples
     }
 }

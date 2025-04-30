@@ -1,6 +1,13 @@
 use either::Either;
-use ffmpeg_next::{codec::Context, decoder, format::context::Input, Packet, Stream};
 use iter::DecodeIter;
+use scuffle_ffmpeg::{
+    consts::Const,
+    decoder,
+    error::{FfmpegError, FfmpegErrorCode},
+    io::Input,
+    packet::Packet,
+    stream::Stream,
+};
 use util::{audio_from_decoder, image_from_decoder};
 
 use crate::{
@@ -14,21 +21,23 @@ mod util;
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error(transparent)]
-    FfmpegError(ffmpeg_next::Error),
+    FfmpegError(FfmpegError),
     #[error("no frames yet to decode")]
     NoFramesYet,
     #[error("failed to convert frame to image")]
     ImageError,
     #[error("audio frame had a length not divisible by 4")]
     AudioFrameLength,
+    #[error("provided stream did not match the required type")]
+    WrongStreamKind,
     #[error("there was no stream of the requested type: {0}")]
     NoSuchStream(&'static str),
 }
 
-impl From<ffmpeg_next::Error> for DecodeError {
-    fn from(value: ffmpeg_next::Error) -> Self {
+impl From<FfmpegError> for DecodeError {
+    fn from(value: FfmpegError) -> Self {
         match value {
-            ffmpeg_next::Error::Other { errno: 11 } => Self::NoFramesYet,
+            FfmpegError::Code(FfmpegErrorCode(-11)) => Self::NoFramesYet,
             e => Self::FfmpegError(e),
         }
     }
@@ -36,63 +45,83 @@ impl From<ffmpeg_next::Error> for DecodeError {
 
 pub enum Decoder {
     VideoOnly {
-        video_decoder: decoder::Video,
-        video_stream_idx: usize,
+        video_decoder: decoder::VideoDecoder,
+        video_stream_idx: i32,
         resolution_hint: ResolutionHint,
     },
     AudioOnly {
-        audio_decoder: decoder::Audio,
-        audio_stream_idx: usize,
+        audio_decoder: decoder::AudioDecoder,
+        audio_stream_idx: i32,
     },
     Both {
-        video_decoder: decoder::Video,
-        video_stream_idx: usize,
+        video_decoder: decoder::VideoDecoder,
+        video_stream_idx: i32,
         resolution_hint: ResolutionHint,
-        audio_decoder: decoder::Audio,
-        audio_stream_idx: usize,
+        audio_decoder: decoder::AudioDecoder,
+        audio_stream_idx: i32,
     },
 }
 
 impl Decoder {
-    pub fn new_both(
-        video_stream: Stream,
-        audio_stream: Stream,
+    pub fn new_maybe(
+        video_stream: Option<Const<'_, Stream>>,
+        audio_stream: Option<Const<'_, Stream>>,
         resolution_hint: ResolutionHint,
     ) -> Result<Self, DecodeError> {
-        let video_ctx = Context::from_parameters(video_stream.parameters())?;
-        let audio_ctx = Context::from_parameters(audio_stream.parameters())?;
+        match (video_stream, audio_stream) {
+            (Some(v), Some(a)) => Self::new_both(v, a, resolution_hint),
+            (Some(v), None) => Self::new_video_only(v, resolution_hint),
+            (None, Some(a)) => Self::new_audio_only(a),
+            (None, None) => Err(DecodeError::NoSuchStream("audio or video")),
+        }
+    }
+    pub fn new_both(
+        video_stream: Const<'_, Stream>,
+        audio_stream: Const<'_, Stream>,
+        resolution_hint: ResolutionHint,
+    ) -> Result<Self, DecodeError> {
+        let vid_dec = decoder::Decoder::new(&video_stream)?
+            .video()
+            .map_err(|_| DecodeError::WrongStreamKind)?;
+        let aud_dec = decoder::Decoder::new(&audio_stream)?
+            .audio()
+            .map_err(|_| DecodeError::WrongStreamKind)?;
         Ok(Self::Both {
-            video_decoder: video_ctx.decoder().video()?,
+            video_decoder: vid_dec,
             video_stream_idx: video_stream.index(),
             resolution_hint,
-            audio_decoder: audio_ctx.decoder().audio()?,
+            audio_decoder: aud_dec,
             audio_stream_idx: audio_stream.index(),
         })
     }
 
-    pub fn new_audio_only(audio_stream: Stream) -> Result<Self, DecodeError> {
-        let audio_ctx = Context::from_parameters(audio_stream.parameters())?;
+    pub fn new_audio_only(audio_stream: Const<'_, Stream>) -> Result<Self, DecodeError> {
+        let aud_dec = decoder::Decoder::new(&audio_stream)?
+            .audio()
+            .map_err(|_| DecodeError::WrongStreamKind)?;
         Ok(Self::AudioOnly {
-            audio_decoder: audio_ctx.decoder().audio()?,
+            audio_decoder: aud_dec,
             audio_stream_idx: audio_stream.index(),
         })
     }
 
     pub fn new_video_only(
-        video_stream: Stream,
+        video_stream: Const<'_, Stream>,
         resolution_hint: ResolutionHint,
     ) -> Result<Self, DecodeError> {
-        let video_ctx = Context::from_parameters(video_stream.parameters())?;
+        let vid_dec = decoder::Decoder::new(&video_stream)?
+            .video()
+            .map_err(|_| DecodeError::WrongStreamKind)?;
         Ok(Self::VideoOnly {
-            video_decoder: video_ctx.decoder().video()?,
+            video_decoder: vid_dec,
             video_stream_idx: video_stream.index(),
             resolution_hint,
         })
     }
 
     /// sends packet to approptiate decoder, otherwise discards it
-    pub fn send_packet(&mut self, packet: &Packet) -> Result<(), ffmpeg_next::Error> {
-        let packet_stream_idx = packet.stream();
+    pub fn send_packet(&mut self, packet: &Packet) -> Result<(), FfmpegError> {
+        let packet_stream_idx = packet.stream_index();
         match self {
             Self::VideoOnly {
                 video_decoder,
@@ -131,28 +160,66 @@ impl Decoder {
         }
     }
 
-    pub fn try_receive_any_frame(&mut self) -> Result<Either<VideoFrame, AudioFrame>, DecodeError> {
+    pub fn send_eof(&mut self) -> Result<(), FfmpegError> {
+        match self {
+            Decoder::VideoOnly {
+                video_decoder,
+                video_stream_idx: _,
+                resolution_hint: _,
+            } => {
+                video_decoder.send_eof()?;
+            }
+            Decoder::AudioOnly {
+                audio_decoder,
+                audio_stream_idx: _,
+            } => {
+                audio_decoder.send_eof()?;
+            }
+            Decoder::Both {
+                video_decoder,
+                video_stream_idx: _,
+                resolution_hint: _,
+                audio_decoder,
+                audio_stream_idx: _,
+            } => {
+                video_decoder.send_eof()?;
+                audio_decoder.send_eof()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn try_receive_any_frame(
+        &mut self,
+    ) -> Result<Option<Either<VideoFrame, AudioFrame>>, DecodeError> {
         match self {
             Self::VideoOnly {
                 video_decoder: _,
                 video_stream_idx: _,
                 resolution_hint: _,
-            } => self.try_receive_video_frame().map(Either::Left),
+            } => self.try_receive_video_frame().map(|r| r.map(Either::Left)),
             Self::AudioOnly {
                 audio_decoder: _,
                 audio_stream_idx: _,
-            } => self.try_receive_audio_frame().map(Either::Right),
+            } => self.try_receive_audio_frame().map(|r| r.map(Either::Right)),
             Self::Both {
                 video_decoder,
                 video_stream_idx,
                 resolution_hint,
                 audio_decoder,
                 audio_stream_idx,
-            } => self.try_receive_video_frame().map(Either::Left),
+            } => {
+                let aud = self.try_receive_audio_frame().map(|r| r.map(Either::Right));
+                if aud.as_ref().is_err() || aud.as_ref().unwrap().is_some() {
+                    aud
+                } else {
+                    self.try_receive_video_frame().map(|r| r.map(Either::Left))
+                }
+            }
         }
     }
 
-    pub fn try_receive_video_frame(&mut self) -> Result<VideoFrame, DecodeError> {
+    pub fn try_receive_video_frame(&mut self) -> Result<Option<VideoFrame>, DecodeError> {
         match self {
             Self::VideoOnly {
                 video_decoder,
@@ -173,7 +240,7 @@ impl Decoder {
         }
     }
 
-    pub fn try_receive_audio_frame(&mut self) -> Result<AudioFrame, DecodeError> {
+    pub fn try_receive_audio_frame(&mut self) -> Result<Option<AudioFrame>, DecodeError> {
         match self {
             Self::VideoOnly {
                 video_decoder: _,
@@ -194,10 +261,11 @@ impl Decoder {
         }
     }
 
-    pub fn into_frame_iter(self, input: Input) -> DecodeIter {
+    pub fn into_frame_iter<T: Send + Sync>(self, input: Input<T>) -> DecodeIter<T> {
         DecodeIter {
             input,
             decoders: self,
+            eof_reached: false,
         }
     }
 }

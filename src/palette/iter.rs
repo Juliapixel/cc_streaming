@@ -1,8 +1,8 @@
 use std::ops::Deref;
 
-use image::{buffer::EnumeratePixels, Rgb};
+use image::{Rgb, buffer::EnumeratePixels};
 
-use super::{from_rgb_to_oklab, BAYER_4X4};
+use super::{BAYER_4X4, from_rgb_to_oklab};
 
 pub struct PaletteIndexIter<'a, T: Deref<Target = [Rgb<u8>]>> {
     pub(super) palette: T,
