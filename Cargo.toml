@@ -7,6 +7,15 @@ edition = "2024"
 opt-level = 0
 debug = "full"
 
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+
+[profile.dev.package.palette]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 debug = "none"

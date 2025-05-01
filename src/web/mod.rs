@@ -10,7 +10,11 @@ use serde::Deserialize;
 use ws::{StreamAudioFrame, StreamVideoFrame};
 
 use crate::{
-    decoder::{DecodeError, Decoder}, dfpwm::DfpwmEncoder, dimensions::ResolutionHint, util::EightIter, ytdl::YtDlpInfo
+    decoder::{DecodeError, Decoder},
+    dfpwm::DfpwmEncoder,
+    dimensions::ResolutionHint,
+    util::EightIter,
+    ytdl::YtDlpInfo,
 };
 
 pub mod ws;

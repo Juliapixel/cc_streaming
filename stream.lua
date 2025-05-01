@@ -505,7 +505,7 @@ while stream_url == nil or stream_url == "" do
 end
 print("starting stream: " .. stream_url)
 stream_url = textutils.urlEncode(stream_url)
-local ws = http.websocket("wss://stuff.juliapixel.com/stream?url=" .. stream_url .. "&width=" .. width .. "&height=" .. height)
+local ws = http.websocketAsync("wss://stuff.juliapixel.com/stream?url=" .. stream_url .. "&width=" .. width .. "&height=" .. height)
 
 print("listening")
 
@@ -569,7 +569,7 @@ local function wait_for_audio()
         return
     end
     local decoded = decoder(popped)
-    if not speaker.playAudio(decoded, 1) then
+    if not speaker.playAudio(decoded, 3) then
         os.pullEvent("speaker_audio_empty")
     else
         local popped = samples.pop_front()
@@ -579,7 +579,7 @@ local function wait_for_audio()
             return
         end
         local decoded = decoder(popped)
-        if not speaker.playAudio(decoded, 1) then
+        if not speaker.playAudio(decoded, 3) then
             samples.push_front(popped)
         end
     end
@@ -605,7 +605,7 @@ local function read_ws()
         spinSleepUntil(ending)
     elseif message.samples ~= nil and speaker ~= nil then
         for i=1, #message.samples do
-            if #sample_acc < 1024 * 8 then
+            if #sample_acc < 1024 * 16 then
                 sample_acc = sample_acc .. string.char(message.samples[i])
             else
                 if samples.push_back(sample_acc) == false then
@@ -620,7 +620,7 @@ local function read_ws()
 end
 
 while true do
-    parallel.waitForAny(read_ws, wait_for_close, wait_for_audio)
+    parallel.waitForAny(wait_for_audio, read_ws, wait_for_close)
     if ws_closed then
         break
     end

@@ -203,11 +203,11 @@ impl Decoder {
                 audio_stream_idx: _,
             } => self.try_receive_audio_frame().map(|r| r.map(Either::Right)),
             Self::Both {
-                video_decoder,
-                video_stream_idx,
-                resolution_hint,
-                audio_decoder,
-                audio_stream_idx,
+                video_decoder: _,
+                video_stream_idx: _,
+                resolution_hint: _,
+                audio_decoder: _,
+                audio_stream_idx: _,
             } => {
                 let aud = self.try_receive_audio_frame().map(|r| r.map(Either::Right));
                 if aud.as_ref().is_err() || aud.as_ref().unwrap().is_some() {

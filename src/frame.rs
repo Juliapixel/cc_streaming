@@ -127,12 +127,12 @@ impl VideoFrame {
 
 #[derive(Debug, Clone)]
 pub struct AudioFrame {
-    samples: Vec<i8>,
+    samples: Vec<f32>,
     timestamp: f64,
 }
 
 impl Deref for AudioFrame {
-    type Target = Vec<i8>;
+    type Target = Vec<f32>;
 
     fn deref(&self) -> &Self::Target {
         &self.samples
@@ -152,20 +152,23 @@ impl AudioFrame {
             decoded.format(),
             decoded.sample_rate(),
             AudioChannelLayout::new(1)?,
-            AVSampleFormat::U8,
+            AVSampleFormat::Fltp,
             48000,
         )?;
 
         let mut resampled = resampler.process(decoded)?;
+        let nb_samples = resampled.nb_samples() as usize;
 
         let buf = resampled
             .data_mut(0)
             .expect("no data[0] present in AudioFrame... wtf?");
 
-        let samples =
-            bytemuck::try_cast_slice_mut::<u8, i8>(buf).map_err(|_| DecodeError::AudioFrameLength)?;
+        let samples = bytemuck::try_cast_slice_mut::<u8, f32>(buf)
+            .map_err(|_| DecodeError::AudioFrameLength)?
+            .split_at(nb_samples)
+            .0;
 
-        samples.iter_mut().for_each(|s| *s ^= 0x80u8 as i8);
+        log::debug!("audio frame received: {nb_samples} samples");
 
         let ts = decoded.pts().unwrap() as f64 * time_base;
 
@@ -179,7 +182,7 @@ impl AudioFrame {
         self.timestamp
     }
 
-    pub fn samples(&self) -> &[i8] {
+    pub fn samples(&self) -> &[f32] {
         &self.samples
     }
 }

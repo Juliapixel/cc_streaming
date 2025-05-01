@@ -4,14 +4,14 @@ use std::collections::VecDeque;
 #[derive(Debug, Default, Clone)]
 pub struct EightIter<T> {
     buffer: VecDeque<T>,
-    yielded: usize
+    yielded: usize,
 }
 
 impl<T> EightIter<T> {
     pub fn new() -> Self {
         Self {
             buffer: VecDeque::new(),
-            yielded: 0
+            yielded: 0,
         }
     }
 
@@ -30,7 +30,7 @@ impl<T> Iterator for EightIter<T> {
                     Some(p) => {
                         self.yielded += 1;
                         Some(p)
-                    },
+                    }
                     None => None,
                 }
             } else {
@@ -41,18 +41,19 @@ impl<T> Iterator for EightIter<T> {
                 Some(p) => {
                     self.yielded += 1;
                     Some(p)
-                },
+                }
                 None => None,
             }
         }
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::EightIter;
 
     #[test]
-    fn inexact() {
+    fn eightiter_inexact() {
         let mut eight = EightIter::new();
         eight.feed_iter([0; 7].as_slice().iter());
 
@@ -71,7 +72,7 @@ mod test {
     }
 
     #[test]
-    fn exact() {
+    fn eightiter_exact() {
         let mut eight = EightIter::new();
         eight.feed_iter([0; 8].iter());
         for _ in 0..8 {

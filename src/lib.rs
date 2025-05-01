@@ -4,6 +4,6 @@ pub mod dfpwm;
 pub mod dimensions;
 pub mod frame;
 pub mod palette;
+pub mod util;
 pub mod web;
 pub mod ytdl;
-pub mod util;
